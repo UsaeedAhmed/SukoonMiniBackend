@@ -23,6 +23,7 @@ RUN mkdir -p /app/logs
 
 # Create an empty database file
 RUN touch /app/smart_home_energy.db
+RUN chmod 666 /app/smart_home_energy.db
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
