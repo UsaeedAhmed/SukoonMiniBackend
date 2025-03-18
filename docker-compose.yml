@@ -12,9 +12,6 @@ services:
       - db-data:/data
       - ./logs:/app/logs
       - ./firebase-credentials.json:/app/firebase-credentials.json:ro
-
-volumes:
-  db-data:
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/app/firebase-credentials.json
     restart: unless-stopped
@@ -24,3 +21,6 @@ volumes:
 networks:
   npm_network:
     external: true
+
+volumes:
+  db-data:
