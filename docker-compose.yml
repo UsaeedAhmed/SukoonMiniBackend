@@ -9,9 +9,12 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - db-data:/app/smart_home_energy.db
+      - db-data:/data
       - ./logs:/app/logs
       - ./firebase-credentials.json:/app/firebase-credentials.json:ro
+
+volumes:
+  db-data:
     environment:
       - GOOGLE_APPLICATION_CREDENTIALS=/app/firebase-credentials.json
     restart: unless-stopped
@@ -21,6 +24,3 @@ services:
 networks:
   npm_network:
     external: true
-
-volumes:
-  db-data:

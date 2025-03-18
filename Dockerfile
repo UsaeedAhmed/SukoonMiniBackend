@@ -21,9 +21,12 @@ COPY . .
 # Create a directory for logs
 RUN mkdir -p /app/logs
 
-# Create an empty database file
-RUN touch /app/smart_home_energy.db
-RUN chmod 666 /app/smart_home_energy.db
+# Create a directory for the database with proper permissions
+RUN mkdir -p /data
+RUN chmod 777 /data
+# We'll create the database file in this directory
+RUN touch /data/smart_home_energy.db
+RUN chmod 666 /data/smart_home_energy.db
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

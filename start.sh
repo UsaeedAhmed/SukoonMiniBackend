@@ -1,5 +1,17 @@
 #!/bin/bash
 
+# Apply the patch to fix database path
+echo "Applying database path patch..."
+python database_manager_patch.py
+
+# Check if database directory exists and is writable
+echo "Checking database directory..."
+mkdir -p /data
+chmod 777 /data
+touch /data/smart_home_energy.db
+chmod 666 /data/smart_home_energy.db
+ls -la /data
+
 # Start the energy calculator in the background
 echo "Starting energy calculator scheduler..."
 python energy_calculator.py --scheduler --interval 15 &
