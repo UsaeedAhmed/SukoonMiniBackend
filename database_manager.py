@@ -945,3 +945,85 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def get_daily_energy_by_hub(
+    self, 
+    hub_code: str, 
+    date_str: Optional[str] = None
+) -> Dict[str, Any]:
+        """
+        Get daily energy consumption for a specific hub.
+        
+        Args:
+            hub_code: Hub code to get data for
+            date_str: Date string in YYYY-MM-DD format (defaults to today)
+            
+        Returns:
+            Dictionary with energy data
+        """
+        if date_str is None:
+            date_str = datetime.now().strftime("%Y-%m-%d")
+            
+        conn, cursor = self._get_connection()
+        
+        try:
+            # Get hub total
+            cursor.execute(
+                """
+                SELECT energy_kwh, usage_hours, user_id 
+                FROM energy_daily 
+                WHERE hub_code = ? AND date = ? AND device_id IS NULL
+                """,
+                (hub_code, date_str)
+            )
+            
+            hub_total = cursor.fetchone()
+            
+            if not hub_total:
+                return {
+                    "hub_code": hub_code,
+                    "date": date_str,
+                    "total_energy": 0.0,
+                    "unit": "kWh",
+                    "devices": {}
+                }
+            
+            # Get all devices for this hub and date
+            cursor.execute(
+                """
+                SELECT device_id, device_type, energy_kwh, usage_hours
+                FROM energy_daily 
+                WHERE hub_code = ? AND date = ? AND device_id IS NOT NULL
+                """,
+                (hub_code, date_str)
+            )
+            
+            devices = {}
+            for row in cursor.fetchall():
+                devices[row['device_id']] = {
+                    "device_id": row['device_id'],
+                    "device_type": row['device_type'],
+                    "energy_value": row['energy_kwh'],
+                    "unit": "kWh",
+                    "usage_hours": row['usage_hours']
+                }
+            
+            # Get rooms data for this hub
+            rooms_data = self.get_rooms_for_hub_energy_data(hub_code, date_str)
+            
+            return {
+                "hub_code": hub_code,
+                "date": date_str,
+                "total_energy": hub_total['energy_kwh'],
+                "unit": "kWh",
+                "usage_hours": hub_total['usage_hours'],
+                "user_id": hub_total['user_id'],
+                "devices": devices,
+                "rooms": rooms_data
+            }
+            
+        except Exception as e:
+            print(f"Error getting daily energy: {e}")
+            return {}
+            
+        finally:
+            conn.close()
