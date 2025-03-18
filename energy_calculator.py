@@ -214,7 +214,7 @@ if __name__ == "__main__":
         '--interval', 
         type=int, 
         default=60, 
-        help='Polling interval in minutes (default: 15)'
+        help='Polling interval in minutes (default: 60)'
     )
     
     args = parser.parse_args()
