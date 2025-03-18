@@ -232,7 +232,7 @@ async def get_hub_rooms(hub_code: str):
         raise HTTPException(status_code=404, detail=f"No rooms found for hub {hub_code}")
     return rooms
 
-@app.get("/hub/{hub_code}/energy", summary="Get hub energy data in the standard format")
+@app.get("/hub/{hub_code}/energy", summary="Get hub energy data with simulations")
 async def get_hub_energy_data(hub_code: str):
     """
     Get energy data for a hub in the standard format.
