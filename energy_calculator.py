@@ -49,9 +49,14 @@ class EnergyCalculator:
                 # Safely extract hub information with fallback values
                 hub_id = hub.get('hubId', 'unknown')
                 hub_code = hub.get('hubCode', hub_id)  # Use hubId as fallback if hubCode is missing
-                user_id = hub.get('userId', 'unknown')
+                user_id = hub.get('userId', '')
                 home_type = hub.get('homeType', '')
                 
+                # Skip hubs with null or empty userId
+                if not user_id:
+                    logger.info(f"Skipping hub: {hub_code} - No user ID assigned (dormant hub)")
+                    continue
+                    
                 logger.info(f"Processing hub: {hub_code} for user: {user_id}")
                 
                 # Store hub in database
