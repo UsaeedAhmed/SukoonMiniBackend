@@ -1,0 +1,14 @@
+firebase-credentials.json
+firebase-credentials.json.enc
+
+smart_home_energy.db
+energy_calculator.log
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
