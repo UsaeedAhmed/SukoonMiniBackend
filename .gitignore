@@ -1,8 +1,15 @@
+# Firebase credentials
 firebase-credentials.json
 firebase-credentials.json.enc
 
+# Database
 smart_home_energy.db
-energy_calculator.log
+smart_home_energy.db-journal
+
+# Logs
+*.log
+logs/
+
 # Virtual Environment
 venv/
 env/
@@ -12,4 +19,19 @@ ENV/
 __pycache__/
 *.py[cod]
 *$py.class
-api.log
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Docker
+.dockerignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS specific files
+.DS_Store
+Thumbs.db

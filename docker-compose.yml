@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  smart-home-energy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: smart-home-energy
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./smart_home_energy.db:/app/smart_home_energy.db
+      - ./logs:/app/logs
+      - ./firebase-credentials.json:/app/firebase-credentials.json:ro
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/firebase-credentials.json
+    restart: unless-stopped
+    networks:
+      - npm_network
+
+networks:
+  npm_network:
+    external: true

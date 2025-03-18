@@ -23,7 +23,7 @@ class EnergyCalculator:
     Main class for calculating and storing energy data.
     """
     
-    def __init__(self, poll_interval: int = 15):
+    def __init__(self, poll_interval: int = 60):
         """
         Initialize the energy calculator.
         
@@ -213,7 +213,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--interval', 
         type=int, 
-        default=15, 
+        default=60, 
         help='Polling interval in minutes (default: 15)'
     )
     
