@@ -611,6 +611,529 @@ async def get_hub_real_energy_data(hub_code: str):
     except Exception as e:
         logger.error(f"Error getting real hub energy data: {e}")
         raise HTTPException(status_code=500, detail=str(e))   
+@app.get("/room/{room_id}/real-energy", summary="Get real room energy data without simulations")
+async def get_room_real_energy_data(room_id: str):
+    """
+    Get energy data for a specific room using only real data from the database.
+    This endpoint only returns data that actually exists in the database,
+    without simulating missing values.
+    """
+    try:
+        # First, get the room details to verify it exists
+        room_details = None
+        
+        # Find the room in the database
+        conn, cursor = db._get_connection()
+        try:
+            cursor.execute(
+                "SELECT room_id, room_name, hub_code FROM rooms WHERE room_id = ?",
+                (room_id,)
+            )
+            room_row = cursor.fetchone()
+            
+            if room_row:
+                room_details = dict(room_row)
+            
+        except Exception as e:
+            logger.error(f"Database error when fetching room: {e}")
+        finally:
+            conn.close()
+        
+        # If room not found in database, try Firestore
+        if not room_details:
+            # Get all rooms from Firestore and find the one with matching room_id
+            all_rooms = []
+            
+            hubs = device_manager.get_all_hubs()
+            for hub in hubs:
+                hub_code = hub.get('hubCode')
+                if hub_code:
+                    rooms = device_manager.get_rooms_by_hub_code(hub_code)
+                    all_rooms.extend(rooms)
+            
+            for room in all_rooms:
+                if room.get('roomId') == room_id:
+                    room_details = {
+                        'room_id': room.get('roomId'),
+                        'room_name': room.get('roomName', f"Room {room_id}"),
+                        'hub_code': room.get('hubCode')
+                    }
+                    break
+        
+        # If room still not found, return 404
+        if not room_details:
+            raise HTTPException(status_code=404, detail=f"Room {room_id} not found")
+        
+        # Get current date
+        now = datetime.datetime.now()
+        current_date = now.strftime("%Y-%m-%d")
+        current_week = now.strftime("%U")
+        current_month = now.strftime("%m")
+        current_year = now.strftime("%Y")
+        
+        # Prepare the basic response structure
+        response = {
+            "room_id": room_id,
+            "room_name": room_details.get('room_name', f"Room {room_id}"),
+            "hub_id": room_details.get('hub_code', ''),
+            "energy_data": {
+                "daily": {
+                    "total_energy": 0,
+                    "unit": "kWh",
+                    "date": current_date,
+                    "devices": {}
+                },
+                "weekly": {
+                    "total_energy": 0,
+                    "unit": "kWh",
+                    "week": current_week,
+                    "year": current_year,
+                    "devices": {}
+                },
+                "monthly": {
+                    "total_energy": 0,
+                    "unit": "kWh",
+                    "month": current_month,
+                    "year": current_year,
+                    "devices": {}
+                },
+                "yearly": {
+                    "total_energy": 0,
+                    "unit": "kWh",
+                    "year": current_year,
+                    "devices": {}
+                }
+            }
+        }
+        
+        # Get device IDs for this room
+        device_ids = []
+        conn, cursor = db._get_connection()
+        try:
+            cursor.execute(
+                "SELECT device_id FROM room_devices WHERE room_id = ?",
+                (room_id,)
+            )
+            for row in cursor.fetchall():
+                device_ids.append(row['device_id'])
+        except Exception as e:
+            logger.error(f"Error getting device IDs for room: {e}")
+        finally:
+            conn.close()
+        
+        # If no devices found, return the empty structure
+        if not device_ids:
+            return response
+        
+        # Try to get actual data from database
+        conn, cursor = db._get_connection()
+        try:
+            # For each time period, get the energy data if available
+            periods = [
+                {"table": "energy_daily", "date_field": "date", "date_value": current_date, "period": "daily"},
+                {"table": "energy_weekly", "date_field": "week", "date_value": current_week, "year_field": "year", "year_value": current_year, "period": "weekly"},
+                {"table": "energy_monthly", "date_field": "month", "date_value": current_month, "year_field": "year", "year_value": current_year, "period": "monthly"},
+                {"table": "energy_yearly", "date_field": "year", "date_value": current_year, "period": "yearly"}
+            ]
+            
+            for period_info in periods:
+                period = period_info["period"]
+                table = period_info["table"]
+                
+                # Build query based on period
+                if period == "daily":
+                    query = f"""
+                    SELECT e.device_id, e.device_type, e.energy_kwh, e.usage_hours, d.status
+                    FROM {table} e
+                    JOIN devices d ON e.device_id = d.device_id
+                    WHERE e.device_id IN ({','.join(['?'] * len(device_ids))})
+                    AND e.date = ?
+                    """
+                    params = device_ids + [period_info["date_value"]]
+                    
+                elif period in ["weekly", "monthly"]:
+                    query = f"""
+                    SELECT e.device_id, e.device_type, e.energy_kwh, e.usage_hours, d.status
+                    FROM {table} e
+                    JOIN devices d ON e.device_id = d.device_id
+                    WHERE e.device_id IN ({','.join(['?'] * len(device_ids))})
+                    AND e.{period_info["date_field"]} = ?
+                    AND e.{period_info["year_field"]} = ?
+                    """
+                    params = device_ids + [period_info["date_value"], period_info["year_value"]]
+                    
+                else:  # yearly
+                    query = f"""
+                    SELECT e.device_id, e.device_type, e.energy_kwh, e.usage_hours, d.status
+                    FROM {table} e
+                    JOIN devices d ON e.device_id = d.device_id
+                    WHERE e.device_id IN ({','.join(['?'] * len(device_ids))})
+                    AND e.{period_info["date_field"]} = ?
+                    """
+                    params = device_ids + [period_info["date_value"]]
+                
+                try:
+                    cursor.execute(query, params)
+                    
+                    for row in cursor.fetchall():
+                        device_data = dict(row)
+                        device_id = device_data.get('device_id')
+                        
+                        # Get device name from devices table
+                        device_name = f"{device_data.get('device_type')} {device_id}"
+                        try:
+                            cursor.execute(
+                                "SELECT device_type FROM devices WHERE device_id = ?",
+                                (device_id,)
+                            )
+                            device_info = cursor.fetchone()
+                            if device_info:
+                                device_name = f"{room_details.get('room_name')} {device_info['device_type']}"
+                        except Exception as e:
+                            logger.warning(f"Could not get device name: {e}")
+                        
+                        # Calculate hourly rate
+                        hourly_rate = 0
+                        usage_hours = device_data.get('usage_hours', 0)
+                        if usage_hours > 0:
+                            hourly_rate = round(device_data.get('energy_kwh', 0) / usage_hours, 2)
+                        
+                        # Add device to response
+                        response["energy_data"][period]["devices"][device_id] = {
+                            "device_id": device_id,
+                            "device_name": device_name,
+                            "device_type": device_data.get('device_type', 'Unknown'),
+                            "energy_value": device_data.get('energy_kwh', 0),
+                            "unit": "kWh",
+                            "usage_hours": usage_hours,
+                            "hourly_rate": hourly_rate
+                        }
+                        
+                        # Add to total energy
+                        response["energy_data"][period]["total_energy"] += device_data.get('energy_kwh', 0)
+                        
+                except Exception as e:
+                    logger.warning(f"Error getting {period} energy data: {e}")
+            
+        except Exception as e:
+            logger.error(f"Database error: {e}")
+        finally:
+            conn.close()
+        
+        # Round all energy values for cleaner response
+        for period in ["daily", "weekly", "monthly", "yearly"]:
+            for device_id, device in response["energy_data"][period]["devices"].items():
+                device["energy_value"] = round(device["energy_value"], 2)
+                device["hourly_rate"] = round(device["hourly_rate"], 2)
+            response["energy_data"][period]["total_energy"] = round(response["energy_data"][period]["total_energy"], 2)
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error getting real room energy data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/room/{room_id}/energy", summary="Get room energy data with simulated values")
+async def get_room_energy_data(room_id: str):
+    """
+    Get energy data for a specific room.
+    The response follows the format of kitchen.json and home-office.json files,
+    with the room as the main object and devices as sub-sections.
+    """
+    try:
+        # First, get the room details to verify it exists
+        room_details = None
+        
+        # Find the room in the database
+        conn, cursor = db._get_connection()
+        try:
+            cursor.execute(
+                "SELECT room_id, room_name, hub_code FROM rooms WHERE room_id = ?",
+                (room_id,)
+            )
+            room_row = cursor.fetchone()
+            
+            if room_row:
+                room_details = dict(room_row)
+            
+        except Exception as e:
+            logger.error(f"Database error when fetching room: {e}")
+        finally:
+            conn.close()
+        
+        # If room not found in database, try Firestore
+        if not room_details:
+            # Get all rooms from Firestore and find the one with matching room_id
+            all_rooms = []
+            
+            hubs = device_manager.get_all_hubs()
+            for hub in hubs:
+                hub_code = hub.get('hubCode')
+                if hub_code:
+                    rooms = device_manager.get_rooms_by_hub_code(hub_code)
+                    all_rooms.extend(rooms)
+            
+            for room in all_rooms:
+                if room.get('roomId') == room_id:
+                    room_details = {
+                        'room_id': room.get('roomId'),
+                        'room_name': room.get('roomName', f"Room {room_id}"),
+                        'hub_code': room.get('hubCode')
+                    }
+                    break
+            
+        # If room still not found, return 404
+        if not room_details:
+            raise HTTPException(status_code=404, detail=f"Room {room_id} not found")
+        
+        # Get current date
+        now = datetime.datetime.now()
+        current_date = now.strftime("%Y-%m-%d")
+        current_week = now.strftime("%U")
+        current_month = now.strftime("%m")
+        current_year = now.strftime("%Y")
+        
+        # Get device details for this room
+        room_devices = []
+        
+        # Try to get devices from database first
+        conn, cursor = db._get_connection()
+        try:
+            cursor.execute(
+                """
+                SELECT d.device_id, d.device_type, d.status
+                FROM room_devices rd
+                JOIN devices d ON rd.device_id = d.device_id
+                WHERE rd.room_id = ?
+                """,
+                (room_id,)
+            )
+            
+            for device_row in cursor.fetchall():
+                device_data = dict(device_row)
+                room_devices.append({
+                    "device_id": device_data.get('device_id'),
+                    "device_type": device_data.get('device_type', 'Unknown'),
+                    "status": bool(device_data.get('status', 0))
+                })
+                
+        except Exception as e:
+            logger.error(f"Database error when fetching room devices: {e}")
+        finally:
+            conn.close()
+        
+        # If no devices found, we'll just continue with an empty list
+        # This means the response will have the correct structure but no device data
+        if len(room_devices) == 0:
+            logger.warning(f"No devices found for room {room_id}")
+            # We'll just use the devices we have (empty list)
+        
+        # Prepare the response structure (following kitchen.json/home-office.json format)
+        response = {
+            "room_id": room_id,
+            "room_name": room_details.get('room_name', f"Room {room_id}"),
+            "hub_id": room_details.get('hub_code', ''),
+            "energy_data": {
+                "daily": {
+                    "total_energy": 0,
+                    "unit": "kWh",
+                    "date": current_date,
+                    "devices": {}
+                },
+                "weekly": {
+                    "total_energy": 0,
+                    "unit": "kWh",
+                    "week": current_week,
+                    "year": current_year,
+                    "devices": {}
+                },
+                "monthly": {
+                    "total_energy": 0,
+                    "unit": "kWh",
+                    "month": current_month,
+                    "year": current_year,
+                    "devices": {}
+                },
+                "yearly": {
+                    "total_energy": 0,
+                    "unit": "kWh",
+                    "year": current_year,
+                    "devices": {}
+                }
+            }
+        }
+        
+        # For each device and time period, generate energy data
+        for device in room_devices:
+            device_id = device.get('device_id', '')
+            device_type = device.get('device_type', 'Unknown')
+            
+            # Get a nice device name if one doesn't exist
+            if 'device_name' in device and device['device_name']:
+                device_name = device['device_name']
+            else:
+                # Try to create a descriptive name based on room and device type
+                room_name = room_details.get('room_name', '')
+                device_name = f"{room_name} {device_type}"
+                
+                # Special handling for common device types
+                if device_type.lower() == 'thermostat':
+                    device_name = f"{room_name} Thermostat"
+                elif device_type.lower() == 'light':
+                    device_name = f"{room_name} Ceiling Light"
+                elif device_type.lower() in ['tv', 'television']:
+                    device_name = f"{room_name} TV"
+                elif device_type.lower() in ['air conditioner', 'airconditioner', 'ac']:
+                    device_name = f"{room_name} Air Conditioner"
+            
+            # Use device manager's energy rates to calculate consumption
+            # Convert device type to a key that matches the device_manager's ENERGY_RATES dictionary
+            device_type_key = device_type.lower().replace(' ', '')
+            hourly_rate = device_manager.ENERGY_RATES.get(device_type_key, 0.05)
+            
+            # If we don't find a match, try some alternative mappings
+            if hourly_rate == 0.05 and device_type.lower() in ['air conditioner', 'air-conditioner']:
+                hourly_rate = device_manager.ENERGY_RATES.get('airconditioner', 0.05)
+            elif hourly_rate == 0.05 and device_type.lower() in ['smart door']:
+                hourly_rate = device_manager.ENERGY_RATES.get('door', 0.05)
+            
+            # Calculate usage hours based on device type
+            daily_hours = 0
+            if device_type.lower() in ['thermostat', 'smartdoor', 'door']:
+                daily_hours = 24
+            elif device_type.lower() in ['light', 'fan']:
+                daily_hours = 10
+            elif device_type.lower() in ['tv', 'airconditioner', 'ac', 'air conditioner']:
+                daily_hours = 8
+            elif device_type.lower() == 'dishwasher':
+                daily_hours = 2
+            else:
+                daily_hours = 6  # Default value
+            
+            # Daily data
+            daily_energy = hourly_rate * daily_hours
+            response["energy_data"]["daily"]["devices"][device_id] = {
+                "device_id": device_id,
+                "device_name": device_name,
+                "device_type": device_type,
+                "energy_value": daily_energy,
+                "unit": "kWh",
+                "usage_hours": daily_hours,
+                "hourly_rate": hourly_rate
+            }
+            response["energy_data"]["daily"]["total_energy"] += daily_energy
+            
+            # Weekly data (7x daily)
+            weekly_hours = daily_hours * 7
+            weekly_energy = hourly_rate * weekly_hours
+            response["energy_data"]["weekly"]["devices"][device_id] = {
+                "device_id": device_id,
+                "device_name": device_name,
+                "device_type": device_type,
+                "energy_value": weekly_energy,
+                "unit": "kWh",
+                "usage_hours": weekly_hours,
+                "hourly_rate": hourly_rate
+            }
+            response["energy_data"]["weekly"]["total_energy"] += weekly_energy
+            
+            # Monthly data (~30x daily)
+            monthly_hours = daily_hours * 30
+            monthly_energy = hourly_rate * monthly_hours
+            response["energy_data"]["monthly"]["devices"][device_id] = {
+                "device_id": device_id,
+                "device_name": device_name,
+                "device_type": device_type,
+                "energy_value": monthly_energy,
+                "unit": "kWh",
+                "usage_hours": monthly_hours,
+                "hourly_rate": hourly_rate
+            }
+            response["energy_data"]["monthly"]["total_energy"] += monthly_energy
+            
+            # Yearly data (365x daily)
+            yearly_hours = daily_hours * 365
+            yearly_energy = hourly_rate * yearly_hours
+            response["energy_data"]["yearly"]["devices"][device_id] = {
+                "device_id": device_id,
+                "device_name": device_name,
+                "device_type": device_type,
+                "energy_value": yearly_energy,
+                "unit": "kWh",
+                "usage_hours": yearly_hours,
+                "hourly_rate": hourly_rate
+            }
+            response["energy_data"]["yearly"]["total_energy"] += yearly_energy
+        
+        # Round total energy values for cleaner numbers
+        for period in ["daily", "weekly", "monthly", "yearly"]:
+            response["energy_data"][period]["total_energy"] = round(response["energy_data"][period]["total_energy"], 2)
+        
+        # Try to get actual data from database if available
+        try:
+            # Get daily energy data from database
+            conn, cursor = db._get_connection()
+            
+            try:
+                # Query for actual device energy data
+                cursor.execute(
+                    """
+                    SELECT d.device_id, d.device_type, ed.energy_kwh, ed.usage_hours 
+                    FROM devices d
+                    JOIN room_devices rd ON d.device_id = rd.device_id
+                    JOIN energy_daily ed ON d.device_id = ed.device_id
+                    WHERE rd.room_id = ? AND ed.date = ?
+                    """,
+                    (room_id, current_date)
+                )
+                
+                real_devices = cursor.fetchall()
+                
+                if real_devices:
+                    # Reset the daily values
+                    response["energy_data"]["daily"]["total_energy"] = 0
+                    
+                    # Update with real data
+                    for device_row in real_devices:
+                        device_data = dict(device_row)
+                        device_id = device_data.get('device_id')
+                        
+                        if device_id in response["energy_data"]["daily"]["devices"]:
+                            # Update existing device
+                            response["energy_data"]["daily"]["devices"][device_id]["energy_value"] = device_data.get('energy_kwh', 0)
+                            response["energy_data"]["daily"]["devices"][device_id]["usage_hours"] = device_data.get('usage_hours', 0)
+                            
+                            # Recalculate hourly rate
+                            usage_hours = device_data.get('usage_hours', 0)
+                            if usage_hours > 0:
+                                response["energy_data"]["daily"]["devices"][device_id]["hourly_rate"] = round(
+                                    device_data.get('energy_kwh', 0) / usage_hours, 2
+                                )
+                            
+                            # Add to total
+                            response["energy_data"]["daily"]["total_energy"] += device_data.get('energy_kwh', 0)
+            
+            except Exception as e:
+                logger.warning(f"Could not get actual daily energy data: {e}")
+            finally:
+                conn.close()
+                
+        except Exception as e:
+            logger.warning(f"Database connection error: {e}")
+        
+        # Round all energy values for cleaner response
+        for period in ["daily", "weekly", "monthly", "yearly"]:
+            for device_id, device in response["energy_data"][period]["devices"].items():
+                device["energy_value"] = round(device["energy_value"], 2)
+                device["hourly_rate"] = round(device["hourly_rate"], 2)
+            response["energy_data"][period]["total_energy"] = round(response["energy_data"][period]["total_energy"], 2)
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error getting room energy data: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Run the app using uvicorn
 if __name__ == "__main__":
