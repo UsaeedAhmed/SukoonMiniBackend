@@ -1348,6 +1348,97 @@ async def get_admin_hub_energy_data(hub_code: str):
         logger.error(f"Error getting admin hub energy data: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# Add this endpoint to api_app.py
+
+# Add this endpoint to api_app.py
+
+@app.get("/hubs/{hub_code}/live-energy", summary="Get real-time energy consumption for a hub")
+async def get_hub_live_energy(hub_code: str):
+    """
+    Calculate and return the real-time energy consumption for a hub based on currently active devices.
+    This endpoint returns the instantaneous power consumption in kilowatts (kW) rather than 
+    energy consumption over time (kWh).
+    """
+    try:
+        # Check if hub exists
+        hub_details = None
+        hubs = device_manager.firestore.query_collection("userHubs", "hubCode", "==", hub_code)
+        if hubs and len(hubs) > 0:
+            hub_details = hubs[0]
+        
+        if not hub_details:
+            raise HTTPException(status_code=404, detail=f"Hub {hub_code} not found")
+            
+        # Get all devices for this hub
+        devices = device_manager.get_devices_by_hub_code(hub_code)
+        if not devices:
+            # Return zero consumption if no devices found
+            return {
+                "hub_id": hub_code,
+                "hub_name": hub_details.get('hubName', f"Hub {hub_code}"),
+                "timestamp": datetime.datetime.now().isoformat(),
+                "total_consumption": 0.0,
+                "unit": "kW",
+                "active_devices": 0,
+                "devices": []
+            }
+        
+        # Filter for devices that are currently on
+        active_devices = [device for device in devices if device.get('on', False)]
+        
+        # Calculate real-time consumption for each active device
+        total_consumption = 0.0
+        device_consumption = []
+        
+        for device in active_devices:
+            device_id = device.get('deviceId', 'unknown')
+            device_type = device.get('deviceType', 'unknown').lower()
+            
+            # Get the hourly energy rate for this device type (in kWh)
+            hourly_rate = device_manager.ENERGY_RATES.get(device_type, 0.05)
+            
+            # Convert hourly energy consumption (kWh) to instantaneous power (kW)
+            # Since the rates are already in kW (energy per hour), we can use them directly
+            power_consumption = hourly_rate
+            
+            # Add to total
+            total_consumption += power_consumption
+            
+            # Get device name or create a descriptive one
+            device_name = device.get('name', f"{device_type.capitalize()} {device_id[-4:]}")
+            
+            # Add device to result
+            device_consumption.append({
+                "device_id": device_id,
+                "device_name": device_name,
+                "device_type": device_type,
+                "consumption": power_consumption,
+                "unit": "kW"
+            })
+        
+        # No need for room-based calculations since we don't need that data
+        
+        # Just round the total consumption for better readability
+        total_consumption = round(total_consumption, 3)
+        
+        # Prepare simplified response with user ID
+        response = {
+            "hub_id": hub_code,
+            "hub_name": hub_details.get('hubName', f"Hub {hub_code}"),
+            "user_id": hub_details.get('userId', ''),
+            "timestamp": datetime.datetime.now().isoformat(),
+            "total_consumption": total_consumption,
+            "unit": "kW",
+            "active_devices": len(active_devices),
+            "total_devices": len(devices)
+        }
+        
+        return response
+        
+    except Exception as e:
+        logger.error(f"Error calculating live energy consumption: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Run the app using uvicorn
 if __name__ == "__main__":
     import uvicorn
