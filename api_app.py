@@ -860,48 +860,124 @@ async def get_room_energy_data(room_id: str):
     try:
         # First, get the room details to verify it exists
         room_details = None
+        room_devices = []
         
-        # Find the room in the database
-        conn, cursor = db._get_connection()
-        try:
-            cursor.execute(
-                "SELECT room_id, room_name, hub_code FROM rooms WHERE room_id = ?",
-                (room_id,)
-            )
-            room_row = cursor.fetchone()
-            
-            if room_row:
-                room_details = dict(room_row)
-            
-        except Exception as e:
-            logger.error(f"Database error when fetching room: {e}")
-        finally:
-            conn.close()
+        # Find the room in Firestore first since that's where the active data is
+        all_rooms = []
+        hub_code = None
         
-        # If room not found in database, try Firestore
-        if not room_details:
-            # Get all rooms from Firestore and find the one with matching room_id
-            all_rooms = []
-            
-            hubs = device_manager.get_all_hubs()
-            for hub in hubs:
-                hub_code = hub.get('hubCode')
-                if hub_code:
-                    rooms = device_manager.get_rooms_by_hub_code(hub_code)
-                    all_rooms.extend(rooms)
-            
-            for room in all_rooms:
-                if room.get('roomId') == room_id:
-                    room_details = {
-                        'room_id': room.get('roomId'),
-                        'room_name': room.get('roomName', f"Room {room_id}"),
-                        'hub_code': room.get('hubCode')
-                    }
+        logger.info(f"Looking for room {room_id} in Firestore")
+        hubs = device_manager.get_all_hubs()
+        for hub in hubs:
+            hub_code = hub.get('hubCode')
+            if hub_code:
+                rooms = device_manager.get_rooms_by_hub_code(hub_code)
+                for room in rooms:
+                    if room.get('roomId') == room_id:
+                        room_details = {
+                            'room_id': room.get('roomId'),
+                            'room_name': room.get('roomName', f"Room {room_id}"),
+                            'hub_code': hub_code
+                        }
+                        
+                        # Get devices directly from the room object
+                        devices_list = room.get('devices', [])
+                        for device_item in devices_list:
+                            if isinstance(device_item, str):
+                                device_id = device_item
+                                # Fetch device details from Firestore
+                                device_info = device_manager.get_device_by_id(device_id)
+                                if device_info:
+                                    room_devices.append({
+                                        "device_id": device_id,
+                                        "device_type": device_info.get('deviceType', 'Unknown'),
+                                        "status": device_info.get('on', False)
+                                    })
+                            elif isinstance(device_item, dict):
+                                device_id = device_item.get('deviceId', '')
+                                if device_id:
+                                    device_info = device_manager.get_device_by_id(device_id)
+                                    if device_info:
+                                        room_devices.append({
+                                            "device_id": device_id,
+                                            "device_type": device_info.get('deviceType', 'Unknown'),
+                                            "status": device_info.get('on', False)
+                                        })
+                        
+                        # If room has device_details, use that for type information
+                        if 'device_details' in room and room['device_details']:
+                            for i, device_detail in enumerate(room['device_details']):
+                                if i < len(room_devices):
+                                    room_devices[i]["device_type"] = device_detail.get('device_type', room_devices[i]["device_type"])
+                        
+                        break
+                if room_details:
                     break
-            
+        
+        # If not found in Firestore, try the database
+        if not room_details:
+            logger.info(f"Room not found in Firestore, checking database")
+            conn, cursor = db._get_connection()
+            try:
+                cursor.execute(
+                    "SELECT room_id, room_name, hub_code FROM rooms WHERE room_id = ?",
+                    (room_id,)
+                )
+                room_row = cursor.fetchone()
+                
+                if room_row:
+                    room_details = dict(room_row)
+                    hub_code = room_details.get('hub_code')
+                    
+                    # Get devices from database
+                    cursor.execute(
+                        """
+                        SELECT d.device_id, d.device_type, d.status
+                        FROM room_devices rd
+                        JOIN devices d ON rd.device_id = d.device_id
+                        WHERE rd.room_id = ?
+                        """,
+                        (room_id,)
+                    )
+                    
+                    for device_row in cursor.fetchall():
+                        device_data = dict(device_row)
+                        room_devices.append({
+                            "device_id": device_data.get('device_id'),
+                            "device_type": device_data.get('device_type', 'Unknown'),
+                            "status": bool(device_data.get('status', 0))
+                        })
+                
+            except Exception as e:
+                logger.error(f"Database error when fetching room: {e}")
+            finally:
+                conn.close()
+        
         # If room still not found, return 404
         if not room_details:
             raise HTTPException(status_code=404, detail=f"Room {room_id} not found")
+        
+        # If we found the room but no devices yet, try fetching from Firestore directly
+        if len(room_devices) == 0 and hub_code:
+            logger.info(f"Room found but no devices. Attempting to fetch devices from hub {hub_code}")
+            
+            # Get all devices for the hub
+            hub_devices = device_manager.get_devices_by_hub_code(hub_code)
+            
+            # Look for devices assigned to this room
+            for device in hub_devices:
+                if device.get('roomId') == room_id:
+                    room_devices.append({
+                        "device_id": device.get('deviceId', 'unknown'),
+                        "device_type": device.get('deviceType', 'Unknown'),
+                        "status": device.get('on', False)
+                    })
+            
+            logger.info(f"Found {len(room_devices)} devices assigned to room {room_id}")
+        
+        # If still no devices, log a warning but continue with empty list
+        if len(room_devices) == 0:
+            logger.warning(f"No devices found for room {room_id} in either Firestore or database")
         
         # Get current date
         now = datetime.datetime.now()
@@ -910,42 +986,7 @@ async def get_room_energy_data(room_id: str):
         current_month = now.strftime("%m")
         current_year = now.strftime("%Y")
         
-        # Get device details for this room
-        room_devices = []
-        
-        # Try to get devices from database first
-        conn, cursor = db._get_connection()
-        try:
-            cursor.execute(
-                """
-                SELECT d.device_id, d.device_type, d.status
-                FROM room_devices rd
-                JOIN devices d ON rd.device_id = d.device_id
-                WHERE rd.room_id = ?
-                """,
-                (room_id,)
-            )
-            
-            for device_row in cursor.fetchall():
-                device_data = dict(device_row)
-                room_devices.append({
-                    "device_id": device_data.get('device_id'),
-                    "device_type": device_data.get('device_type', 'Unknown'),
-                    "status": bool(device_data.get('status', 0))
-                })
-                
-        except Exception as e:
-            logger.error(f"Database error when fetching room devices: {e}")
-        finally:
-            conn.close()
-        
-        # If no devices found, we'll just continue with an empty list
-        # This means the response will have the correct structure but no device data
-        if len(room_devices) == 0:
-            logger.warning(f"No devices found for room {room_id}")
-            # We'll just use the devices we have (empty list)
-        
-        # Prepare the response structure (following kitchen.json/home-office.json format)
+        # Prepare the response structure
         response = {
             "room_id": room_id,
             "room_name": room_details.get('room_name', f"Room {room_id}"),
