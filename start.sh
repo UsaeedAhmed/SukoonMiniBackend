@@ -14,7 +14,7 @@ ls -la /data
 
 # Start the energy calculator in the background
 echo "Starting energy calculator scheduler..."
-python energy_calculator.py --scheduler --interval 15 &
+python energy_calculator.py --scheduler --interval 60 &
 
 # Store the PID of the background process
 CALCULATOR_PID=$!
