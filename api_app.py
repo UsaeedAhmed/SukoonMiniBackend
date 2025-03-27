@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from device_data_manager import DeviceDataManager
 from database_manager import DatabaseManager
 from energy_calculator import EnergyCalculator
+from firestore_connection import FirestoreConnection
 
 # Configure logging
 logging.basicConfig(
@@ -1193,6 +1194,10 @@ async def get_room_energy_data(room_id: str):
         raise HTTPException(status_code=500, detail=str(e))
     
 
+
+
+from firestore_connection import FirestoreConnection
+
 @app.get("/admin-hub/{hub_code}/energy", summary="Get energy data for admin hub")
 async def get_admin_hub_energy_data(hub_code: str):
     """
@@ -1201,15 +1206,18 @@ async def get_admin_hub_energy_data(hub_code: str):
     Includes daily, weekly, monthly, and yearly data with connected tenant hubs' energy consumption.
     """
     try:
-        # First, get the hub details to check if it's an admin hub
+        # Get the hub details directly from Firebase
         hub_details = None
+        firestore = FirestoreConnection()
         
-        # Get hub from Firestore
-        hubs = device_manager.firestore.query_collection("userHubs", "hubCode", "==", hub_code)
+        # Query Firestore for the hub using the hubCode field
+        hubs = firestore.query_collection("userHubs", "hubCode", "==", hub_code)
+        
+        # Check if we found any hubs with this hubCode
         if hubs and len(hubs) > 0:
             hub_details = hubs[0]
         
-        # If no hub found or not an admin hub, return 404
+        # If no hub found, return 404
         if not hub_details:
             raise HTTPException(status_code=404, detail=f"Hub {hub_code} not found")
             
@@ -1265,133 +1273,101 @@ async def get_admin_hub_energy_data(hub_code: str):
             }
         }
         
-        # Get tenant hubs associated with this admin hub
-        tenant_hub_codes = []
-        if hub_details and 'units' in hub_details:
-            tenant_hub_codes = hub_details.get('units', [])
+        # Get tenant hubs associated with this admin hub from the units array
+        tenant_hub_codes = hub_details.get('units', [])
             
         if not tenant_hub_codes:
             logger.warning(f"Admin hub {hub_code} has no tenant hubs associated with it")
             
-        # For each tenant hub in the units array, fetch their energy data
+        # For each tenant hub code in the units array, fetch details from Firebase
         for tenant_hub_code in tenant_hub_codes:
-            # Try to get hub details from Firestore
+            # Query Firestore for the tenant hub using the hubCode field
+            tenant_hubs = firestore.query_collection("userHubs", "hubCode", "==", tenant_hub_code)
+            
             tenant_hub_details = None
-            try:
-                tenant_hubs_from_db = device_manager.firestore.query_collection("userHubs", "hubCode", "==", tenant_hub_code)
-                if tenant_hubs_from_db and len(tenant_hubs_from_db) > 0:
-                    tenant_hub_details = tenant_hubs_from_db[0]
-            except Exception as e:
-                logger.warning(f"Error fetching tenant hub details for {tenant_hub_code}: {e}")
+            if tenant_hubs and len(tenant_hubs) > 0:
+                tenant_hub_details = tenant_hubs[0]
             
-            # Get tenant hub name - this would typically come from the tenant hub's details
-            # For the demo, we'll use names similar to those in admin-hub.json
-            property_types = {
-                "apartment": "Apartment Building",
-                "house": "House",
-                "office": "Commercial Office",
-                "retail": "Retail Space"
-            }
-            
-                        # Get a display name for the tenant hub
-            property_type = 'apartment'
-            if tenant_hub_details and 'propertyType' in tenant_hub_details:
-                property_type = tenant_hub_details.get('propertyType', 'apartment').lower()
+            if not tenant_hub_details:
+                logger.warning(f"Tenant hub {tenant_hub_code} not found in Firestore")
+                continue
                 
-            property_name = property_types.get(property_type, "Apartment Building")
-            tenant_name = None
+            # Get the tenant hub name from unitName field
+            tenant_name = tenant_hub_details.get('unitName', '')
             
-            if tenant_hub_details and 'hubName' in tenant_hub_details:
-                tenant_name = tenant_hub_details.get('hubName')
-            
-            # If no name in hub details, create one based on property type
+            # If unitName is not available, fallback to hubName
             if not tenant_name:
+                tenant_name = tenant_hub_details.get('hubName', '')
+                
+            # If still no name, create a generic one based on property type
+            if not tenant_name:
+                property_type = tenant_hub_details.get('propertyType', 'apartment').lower()
+                property_types = {
+                    "apartment": "Apartment Building",
+                    "house": "House",
+                    "office": "Commercial Office",
+                    "retail": "Retail Space"
+                }
+                property_name = property_types.get(property_type, "Apartment Building")
+                
                 # Generate a letter suffix (A, B, C, etc.) based on position in list
                 idx = tenant_hub_codes.index(tenant_hub_code)
                 letter_suffix = chr(65 + (idx % 26))  # 65 is ASCII for 'A'
                 tenant_name = f"{property_name} {letter_suffix}"
-                
-            # Now get energy data for the tenant hub
-            # Try to use the hub energy endpoint we already have
-            try:
-                # We'll make an internal request to our own endpoint
-                # This is a simplified approach - in a real app, you might use a more direct method
-                tenant_data = None
-                
-                # First try the real energy data endpoint
-                try:
-                    tenant_data = await get_hub_real_energy_data(tenant_hub_code)
-                except Exception:
-                    # If real energy fails, try the simulated endpoint
-                    try:
-                        tenant_data = await get_hub_energy_data(tenant_hub_code)
-                    except Exception as e:
-                        logger.warning(f"Could not get energy data for tenant hub {tenant_hub_code}: {e}")
-                
-                if tenant_data and "energy_data" in tenant_data:
-                    # Extract the energy data from the tenant hub response
-                    # For each time period, extract total energy
-                    for period in ["daily", "weekly", "monthly", "yearly"]:
-                        if period in tenant_data["energy_data"]:
-                            tenant_period_data = tenant_data["energy_data"][period]
-                            tenant_energy = tenant_period_data.get("total_energy", 0.0)
-                            
-                            # Add to admin hub total
-                            response["energy_data"][period]["total_energy"] += tenant_energy
-                            
-                            # Add tenant hub to period data
-                            response["energy_data"][period]["tenant_hubs"][tenant_name] = {
-                                "hub_id": tenant_hub_code,
-                                "energy_value": tenant_energy,
-                                "unit": "kWh"
-                            }
-                
-            except Exception as e:
-                logger.error(f"Error processing tenant hub {tenant_hub_code}: {e}")
-                
-                    # Generate simulated data since we couldn't get real data
-                logger.info(f"Using simulated data for tenant hub {tenant_hub_code}")
-                import random
-                
-                daily_energy = round(random.uniform(20.0, 70.0), 2)
-                weekly_energy = daily_energy * 7
-                monthly_energy = daily_energy * 30
-                yearly_energy = daily_energy * 365
-                
-                # Add to admin hub totals
-                response["energy_data"]["daily"]["total_energy"] += daily_energy
-                response["energy_data"]["weekly"]["total_energy"] += weekly_energy
-                response["energy_data"]["monthly"]["total_energy"] += monthly_energy
-                response["energy_data"]["yearly"]["total_energy"] += yearly_energy
-                
-                # Add tenant hub entries
-                for period, energy_value in [
-                    ("daily", daily_energy),
-                    ("weekly", weekly_energy),
-                    ("monthly", monthly_energy),
-                    ("yearly", yearly_energy)
-                ]:
-                    response["energy_data"][period]["tenant_hubs"][tenant_name] = {
-                        "hub_id": tenant_hub_code,
-                        "energy_value": energy_value,
-                        "unit": "kWh"
-                    }
+            
+            # Generate simulated energy data for this tenant hub
+            # We'll use a consistent approach to ensure values make sense across time periods
+            import random
+            
+            # Base daily consumption between 20-70 kWh
+            daily_base = random.uniform(20.0, 70.0)
+            
+            # Add some randomness but keep relative scale appropriate
+            daily_energy = round(daily_base, 2)
+            weekly_energy = round(daily_base * 7 * random.uniform(0.95, 1.05), 2)
+            monthly_energy = round(daily_base * 30 * random.uniform(0.95, 1.05), 2)
+            yearly_energy = round(daily_base * 365 * random.uniform(0.95, 1.05), 2)
+            
+            # Add to admin hub totals
+            response["energy_data"]["daily"]["total_energy"] += daily_energy
+            response["energy_data"]["weekly"]["total_energy"] += weekly_energy
+            response["energy_data"]["monthly"]["total_energy"] += monthly_energy
+            response["energy_data"]["yearly"]["total_energy"] += yearly_energy
+            
+            # Add tenant hub entries to each time period
+            response["energy_data"]["daily"]["tenant_hubs"][tenant_name] = {
+                "hub_id": tenant_hub_code,
+                "energy_value": daily_energy,
+                "unit": "kWh"
+            }
+            
+            response["energy_data"]["weekly"]["tenant_hubs"][tenant_name] = {
+                "hub_id": tenant_hub_code,
+                "energy_value": weekly_energy,
+                "unit": "kWh"
+            }
+            
+            response["energy_data"]["monthly"]["tenant_hubs"][tenant_name] = {
+                "hub_id": tenant_hub_code,
+                "energy_value": monthly_energy,
+                "unit": "kWh"
+            }
+            
+            response["energy_data"]["yearly"]["tenant_hubs"][tenant_name] = {
+                "hub_id": tenant_hub_code,
+                "energy_value": yearly_energy,
+                "unit": "kWh"
+            }
         
         # Round all energy values for cleaner response
         for period in ["daily", "weekly", "monthly", "yearly"]:
             response["energy_data"][period]["total_energy"] = round(response["energy_data"][period]["total_energy"], 2)
-            for hub_name, hub_data in response["energy_data"][period]["tenant_hubs"].items():
-                hub_data["energy_value"] = round(hub_data["energy_value"], 2)
         
         return response
         
     except Exception as e:
         logger.error(f"Error getting admin hub energy data: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-# Add this endpoint to api_app.py
-
-# Add this endpoint to api_app.py
 
 @app.get("/hubs/{hub_code}/live-energy", summary="Get real-time energy consumption for a hub")
 async def get_hub_live_energy(hub_code: str):
